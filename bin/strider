@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 
+// loading environment variables from .env file if present.
+// todo: fork the lib, add some logging
+var dotenv = require('dotenv')();
+dotenv.load();
+
 var connect = function() {
   var mongoose = require('mongoose'),
       mongodbUrl = require('../lib/config').db_uri;
