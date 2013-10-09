@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% pluginblock ExtraStyles %}
+<link rel="stylesheet" href="/stylesheets/css/bootstrap-switch.css"/>
+<link rel="stylesheet" href="/stylesheets/css/projects.css"/>
+<script>
+  var providers = {{ providers | scriptjson | raw }};
+  var accounts = {{ currentUser.accounts | scriptjson | raw }};
+  var repos = {{ repos | scriptjson | raw }};
+</script>
+{% endpluginblock %}
+
+
+{% block bodyContent %}
+<div id="confirm-delete-project" class="modal fade">
+  <div class="modal-header">
+    <button data-dismiss="modal" class="close"></button>
+    <x></x>
+    <h3>Delete <span class="project-name"></span> Configuration?</h3>
+  </div>
+  <div class="modal-body">
+    <p>Are you sure you want to delete <span class="project-name"></span>?</p>
+  </div>
+  <div class="modal-footer">
+    <a data-dismiss="modal" class="btn">No</a>
+    <a class="btn btn-primary btn-delete-project">Yes, I'm sure</a>
+  </div>
+</div>
+
+<div class="projects-page" ng-app="Projects" ng-controller="AlertsController">
+  <div class="accounts-nav">
+    <div class="pull-right"><a href="?refresh=true" class="refresh btn btn-warning"><i class="icon-refresh"></i></a></div>
+    <ul class="nav nav-pills">
+      {% for account in currentUser.accounts %}
+      <li{% if loop.first %} class="active"{% endif %}>
+        <a href="#account-{{ account.provider }}-{{ account.id }}" data-toggle="tab">
+          {% if providers[account.provider].inline_icon %}<i class="icon-{{ providers[account.provider].inline_icon }}"></i>{% endif %} 
+          {{ account.title }}
+        </a>
+      </li>
+      {% endfor %}
+      <li>
+        <a href="#manual-setup" data-toggle="tab"{% if !currentUser.accounts.length %} class="active"{% endif %}>Manual Add</a>
+      </li>
+      {% for provider in unconfigured %}
+      <li>
+        <a href="{{ provider.setupLink }}">
+          {% if provider.inline_icon %}<i class="icon-{{ provider.inline_icon }}"></i>{% endif %} Setup {{ provider.title }}
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+    <div class="notify-wrapper pull-right">
+      <div id="notify" ng-class="{ visible: message.showing }" class="alert alert-[[ message.type ]]">
+        <a type="button" class="close" ng-click="clearMessage()">&times;</a>
+        <div class="message" ng-bind-html="message.text"></div>
+      </div>
+    </div>
+
+  <div class="tab-content" ng-controller="ProjectsController">
+    <div ng-repeat="account in accounts" id="account-[[ account.provider ]]-[[ account.id ]]" class="row tab-pane" ng-class="{ active: $first }">
+      {# TODO hide this if there is only one group #}
+      <ul class="span2 nav nav-list nav-stacked groups-list">
+        <li ng-repeat="(name, group) in repos[account.provider][account.id]"
+            ng-class="{active: $first}">
+          <a data-toggle="tab" href="#group-[[ account.provider ]]-[[ account.id ]]-[[ name ]]">
+            [[ name ]]
+            <span class="label label-success pull-right" ng-show="group.configured">[[ group.configured ]]</span>
+          </a>
+        </li>
+      </ul>
+      <div class="tab-content span9">
+        <ul
+           ng-repeat="(name, group) in repos[account.provider][account.id]"
+           id="group-[[ account.provider ]]-[[ account.id ]]-[[ name ]]"
+           class="tab-pane repo-list unstyled" ng-class="{ active: $first }">
+          <li ng-repeat="repo in group.repos" class="repo" ng-class="{ configured: !!repo.project }">
+            <div>
+              <a href="[[ repo.display_url ]]" target="_blank" class="hosted-url">
+                <i class="icon-globe"></i>
+              </a>
+              <span ng-switch="!!repo.project">
+                <a class="view-jobs" ng-switch-when="true" href="/[[ repo.project.name ]]/">[[ repo.display_name ]]</a>
+                <span ng-switch-default>[[ repo.display_name ]]</span>
+              </span>
+              <div class="pull-right action" ng-switch="!!repo.project">
+                <span ng-switch-when="true">
+                  <button ng-show="repo.really_remove" class="btn btn-danger" ng-click="removeProject(account, repo, group)" ng-disabled="repo.really_remove === 'removing'">
+                    <i class="icon-refresh icon-spin" ng-show="repo.really_remove === 'removing'"></i>
+                    Really remove
+                  </button>
+                  <a href="/[[ repo.project.name ]]/config" data-toggle="tooltip" title="Configure"><i class="icon-wrench"></i></a>
+                  <button class="btn btn-danger" ng-click="repo.really_remove = true" ng-disabled="repo.really_remove">Remove</button>
+                </span>
+                <button ng-disabled="repo.adding" ng-switch-default class="btn btn-primary" ng-click="repo.adding = 'pick-type'">Add</button>
+              </div>
+            <div class="adding-repo pull-right" ng-show="repo.adding" ng-switch="repo.adding">
+              <div class="pick-type" ng-switch-when="pick-type">
+                <span class="text">What type of project?</span>
+                {% for type in project_types %}
+                <div data-toggle="tooltip"
+                     data-placement="bottom"
+                     title="{{ type.description }}"
+                     class="project-type btn"
+                     ng-click="repo.adding = 'loading'; setupProject(account, repo, '{{ loop.key }}', group)">
+                  {{ loop.key }}
+                </div>
+                {% endfor %}
+              </div>
+              <div ng-switch-when="loading" class="setting-up">
+                <span class="text">
+                  Setting up
+                  <i class="icon-refresh icon-spin"></i>
+                </span>
+              </div>
+              <div ng-switch-when="done">
+                <button type="button" class="close" ng-click="repo.adding=false">&times;</button>
+                <span class="text">Complete!</span>
+                <div class="btn btn-success" ng-click="startTest(repo)">
+                  Start the first test
+                </div>
+                <a class="btn" href="/[[ repo.project.display_name ]]/config">
+                  Configure
+                </a>
+              </div>
+            </div>
+            </div>
+          </li>
+        </ul>
+      </div>
+    </div>
+    <div class="tab-pane" id="manual-setup">
+      Setting this up the manual way.
+    </div>
+  </div>
+</div>
+
+{% include "partials/spinner.html" %}
+<script src='/socket.io/socket.io.js'></script>
+<div id="dashboard"></div>
+<script src="/javascripts/lib/bootstrap-switch.js"></script>
+<script src="/javascripts/modules/alerts.js"></script>
+<script src="/javascripts/modules/moment.js"></script>
+<script src="/javascripts/pages/projects.js"></script>
+<script src='/javascripts/jquery.scrollTo-1.4.2-min.js'></script>
+
+{% endblock %}

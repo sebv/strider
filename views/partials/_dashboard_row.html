@@ -1,3 +1,4 @@
+{% if page !== 'history' && !public && currentUser %}
 <td class="deploy" ng-hide="page === 'build'">
   <span ng-hide="job.running"
         ng-click="startDeploy(job)"
@@ -6,22 +7,25 @@
     <i class="icon-cloud-upload"></i>
   </span>
 </td>
-<td class="job-link" ng-switch="page==='build'">
-  <a href="[[ job.url ]]" ng-switch-when="false" ng-switch="job.status">
-    <i ng-switch-when="succeeded" class="icon-check-sign success-text"></i>
-    <i ng-switch-when="running" class="icon-cog icon-spin"></i>
-    <i ng-switch-when="submitted" class="icon-cog icon-spin"></i>
-    <i ng-switch-when="failed" class="icon-exclamation-sign failure-text"></i>
-    <span>[[ job.id.substr(0,8) ]]</span>
-  </a>
-  <span ng-switch-when="true" ng-switch="job.status">
-    <i ng-switch-when="succeeded" class="icon-check-sign success-text"></i>
-    <i ng-switch-when="running" class="icon-cog icon-spin"></i>
-    <i ng-switch-when="submitted" class="icon-cog icon-spin"></i>
-    <i ng-switch-when="failed" class="icon-exclamation-sign failure-text"></i>
-    <span>[[ job.id.substr(0,8) ]]</span>
-  </span>
+{% endif %}
+<td class="job-link">
+  {% if page !== 'build' %}
+  <a href="/[[ job.project.display_name || project.display_name ]]/[[ job.nojobs ? '' : 'job/' + job._id ]]">
+  {% endif %}
+  <i ng-hide="job.nojobs"
+     data-toggle="tooltip"
+     title="[[ job.status ]]"
+     class="[[ {'passed': 'icon-check-sign success-text',
+                'failed': 'icon-exclamation-sign failure-text',
+                'running': 'icon-cog icon-spin',
+                'submitted': 'icon-time waiting-text',
+                'errored': 'icon-minus-sign error-text'}[job.status] ]]"></i>
+  <span ng-show="job.nojobs">No job history</span>
+  <span>[[ job._id.substr(0,8) ]]</span>
+  {% if page !== 'build' %}</a>{% endif %}
 </td>
+{% if page !== 'history' %}
+{% if !public && currentUser %}
 <td class="refresh" ng-hide="page === 'build'">
   <span ng-hide="job.running" data-toggle="tooltip"
         ng-click="startTest(job)"
@@ -31,56 +35,67 @@
   </span>
 </td>
 <td class="configure" ng-hide="page === 'build'">
-  <a href="/[[ job.project_name ]]/config"
+  <a href="/[[ job.project.display_name || project.display_name ]]/config"
      data-toggle="tooltip" data-delay="500" title="Configure">
     <i class="icon-wrench"></i>
   </a>
 </td>
+{% endif %}
 <td class="project-name" ng-hide="page === 'build'">
-  <a href="/[[ job.project_name ]]/">
-    [[ job.project_name ]]
+  <a href="/[[ job.project.display_name || project.display_name ]]/">
+    [[ job.project.display_name ]]
   </a>
 </td>
 <td class="history" ng-hide="page === 'build'">
   <table class='last-builds'>
     <tr>
-      <td ng-repeat="pjob in job.prev" title="[[ pjob.id.slice(0,8) ]] [[ pjob.stat ]]" class='build-[[ $index ]] status-[[ pjob.stat ]]'></td>
+      <td ng-repeat="pjob in job.project.prev"
+          data-toggle="tooltip"
+          title="[[ pjob._id.slice(0,8) ]] [[ pjob.status ]]"
+          class="build-[[ $index ]] status-[[ pjob.status ]]"></td>
     </tr>
   </table>
 </td>
+{% endif %}
 <td class="committer">
-  <div ng-show="job.triggered_by_commit" ng-switch="job.committer.url">
-    <img ng-switch-when="null" ng-src="[[ job.committer.image ]]"/>
-    <a ng-switch-default href="[[ job.committer.url ]]">
-      <img ng-src="[[ job.committer.image ]]"/>
+  <div ng-show="job.trigger.author.image" ng-switch="!!job.trigger.author.url">
+    <img ng-switch-when="false" ng-src="[[ job.trigger.author.image ]]"/>
+    <a ng-switch-default href="[[ job.trigger.author.url ]]" target="_blank">
+      <img ng-src="[[ job.trigger.author.image ]]"/>
     </a>
   </div>
 </td>
-<td class="commit-url">
-  <a ng-show="job.triggered_by_commit"
-     href="[[ job.commit.url ]]">
+<td class="commit-url" ng-switch="!!job.trigger.url">
+  <a href="[[ job.trigger.url ]]" ng-switch-when="true" target="_blank">
     <span class="small-text">
-      [[ job.commit.message ]]
+      <i class="trigger-icon icon-[[ triggers[job.trigger.type].icon ]]" data-toggle="tooltip" title="[[ triggers[job.trigger.type].title ]]"></i>
+      [[ job.trigger.message ]]
     </span>
   </a>
+  <span class="small-text" ng-switch-default>
+    <i class="trigger-icon icon-[[ triggers[job.trigger.type].icon ]]" data-toggle="tooltip" title="[[ triggers[job.trigger.type].title ]]"></i>
+    [[ job.trigger.message ]]
+  </span>
 </td>
+{% if page !== 'history' %}
 <td class="github-link" ng-hide="page === 'build'">
-  <a href="[[ job.repo_url ]]" target="_blank">
+  <a href="[[ job.project.display_url || project.display_url ]]" target="_blank">
     <i class="icon-github"></i>
   </a>
 </td>
-<td class="run-time">
-  <span class="small-text">
-    [[ job.duration ]]s
-  </span>
+{% endif %}
+<td class="run-time" ng-switch="job.status">
+  <time ng-switch-when="running" class="duration" since="[[ job.created ]]" ng-hide="job.nojobs"></time>
+  <time ng-switch-when="submitted" class="duration" since="[[ job.started ]]" ng-hide="job.nojobs"></time>
+  <time ng-switch-default class="duration" duration="[[ job.duration ]]" ng-hide="job.nojobs"></time>
 </td>
-<td class="finished-at" ng-switch="job.running">
-  <span ng-switch-when="false" class="small-text">
-    <time data-toggle="tooltip" data-placement="top" datetime="[[ job.finished_timestamp ]]" class="timeago"></time>
+<td class="finished-at" ng-switch="job.status === 'running'">
+  <span ng-switch-when="false" class="small-text" ng-hide="job.nojobs || job.status === 'submitted'">
+    <time data-toggle="tooltip" data-placement="top" datetime="[[ job.finished ]]" class="timeago"></time>
   </span>
   <div ng-switch-when="true" class="progress-meter">
     <div class="progress progress-striped active progress-info">
-      <div class="bar" style="width:[[ job.time_elapsed/job.past_duration*100 ]]%; max-width: 100%"></div>
+      <div class="bar" style="width:[[ (phases.indexOf(job.phase)+1)/phases.length*100 ]]%; max-width: 100%"></div>
     </div>
   </div>
 </td>

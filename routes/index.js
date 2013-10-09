@@ -5,18 +5,21 @@
 var BASE_PATH = "../lib/"
 
 var _ = require('underscore')
+  , async = require('async')
   , Step = require('step')
   , fs = require('fs')
   , path = require('path')
 
+  , utils = require(BASE_PATH + 'utils')
   , models = require(BASE_PATH + 'models')
   , common = require(BASE_PATH + 'common')
   , config = require(BASE_PATH + 'config')
-  , gh = require(BASE_PATH + 'github')
   , jobs = require(BASE_PATH + 'jobs')
   , logging = require(BASE_PATH + 'logging')
-  , User = require(BASE_PATH + 'models').User
-  , Job = require(BASE_PATH + 'models').Job
+  , models = require(BASE_PATH + 'models')
+  , Project = models.Project
+  , User = models.User
+  , Job = models.Job
   , pjson = require('../package.json')
   , async = require('async')
 
@@ -28,57 +31,25 @@ var TEST_AND_DEPLOY = "TEST_AND_DEPLOY";
  */
 
 exports.index = function(req, res){
-  if (req.loggedIn == false){
+  if (req.session.return_to) {
+    var return_to = req.session.return_to
+    req.session.return_to=null
+    return res.redirect(return_to)
   }
-  if (req.session.return_to != null) {
-    var return_to = req.session.return_to;
-    req.session.return_to=null;
-    res.redirect(return_to);
-  } else {
-    var code = "";
-    if (req.param('code') !== undefined) {
-      code = req.param('code');
-      res.render('register.html', {invite_code:code});
-    } else {
-      if (req.user != undefined) {
-        req.user.get_repo_config_list(function(err, repo_list) {
-          if (err) throw err;
-          res.render('index.html',{total_configured_projects:repo_list.length});
-        });
-      } else {
-        res.render('index.html');
-      }
-    }
-
+  var code = ""
+  if (req.param('code') !== undefined) {
+    code = req.param('code')
+    return res.render('register.html', {invite_code:code})
   }
+  jobs.latestJobs(req.user, true, function (err, jobs) {
+    res.render('index.html', {jobs: jobs})
+  })
 };
 
 
-function whitelist_repo_config(repo_config) {
-  var trepo = {
-    display_name:repo_config.display_url.replace(/^.*com\//gi, ''),
-    display_url:repo_config.display_url,
-    url:repo_config.url,
-    project_type:repo_config.project_type,
-    webhooks:repo_config.webhooks,
-    prod_deploy_target:repo_config.deploy_target
-  };
-  return trepo;
-}
-
-function whitelist_repo_metadata(repo_metadata) {
-  var trepo = {
-    display_name:repo_metadata.html_url.replace(/^.*com\//gi, ''),
-    url:repo_metadata.html_url,
-    id:repo_metadata.id
-  };
-  return trepo;
-}
-
-
-/*
+/* TODO: This is currently disabled. Do we need a kickoff at all?
+ *
  * GET /kickoff  - start configuration wizard for a job
- */
 exports.kickoff = function(req, res, github) {
   var gh = github || gh;
   // Assert cached github metadata
@@ -101,292 +72,185 @@ exports.kickoff = function(req, res, github) {
 
   }
 };
-
-
-
+ */
 
 /*
  * GET /account - account settings page
  */
 exports.account = function(req, res){
-  res.render('account.html');
+  var hosted = {}
+    , providers = common.userConfigs.provider
+  for (var id in providers) {
+    if (common.extensions.provider[id].hosted) {
+      hosted[id] = providers[id]
+    }
+  }
+  res.render('account.html', {
+    user: utils.sanitizeUser(req.user.toJSON()),
+    providers: hosted
+  });
 };
+
+exports.setConfig = function (req, res) {
+  var attrs = 'public'.split(' ')
+  for (var i=0; i<attrs.length; i++) {
+    if ('undefined' !== typeof req.body[attrs[i]]) {
+      req.project[attrs[i]] = req.body[attrs[i]]
+    }
+  }
+  req.project.save(function (err) {
+    if (err) return res.send(500, 'failed to save project')
+    res.send(200, 'saved')
+  })
+}
+
+exports.getRunnerConfig = function (req, res) {
+  var branch = req.project.branch(req.params.branch)
+  res.send(branch.runner)
+}
+
+exports.setRunnerConfig = function (req, res) {
+  var branch = req.project.branch(req.params.branch)
+  branch.runner.config = req.body
+  req.project.save(function (err, project) {
+    if (err) return res.send(500, {error: 'Failed to save runner config'})
+    res.send(project.branch(req.params.branch).runner.config)
+  })
+}
+
+// GET /:org/:repo/config/:branch/:pluginname
+// Output: the config
+exports.getPluginConfig = function (req, res) {
+  res.send(req.pluginConfig())
+}
+
+// POST /:org/:repo/config/:branch/:pluginname
+// Set the configuration for a plugin on a branch. Output: the new config.
+exports.setPluginConfig = function (req, res) {
+  req.pluginConfig(req.body, function (err, config) {
+    if (err) return res.send(500, {error: 'Failed to save plugin config'})
+    res.send(config)
+  })
+}
+
+exports.configureBranch = function (req, res) {
+  var branch = req.project.branch(req.params.branch)
+  if (!branch) {
+    return res.send(400, 'Invalid branch')
+  }
+  if (req.body.plugin_order) {
+    return setPluginOrder(req, res, branch);
+  }
+  var attrs = 'active privkey pubkey mirror_master deploy_on_green runner plugins'.split(' ')
+  for (var i=0; i<attrs.length; i++) {
+    if ('undefined' !== typeof req.body[attrs[i]]) {
+      branch[attrs[i]] = req.body[attrs[i]]
+    }
+  }
+  req.project.save(function (err) {
+    if (err) return res.send(500, 'failed to save project')
+    res.send(200, 'saved')
+  })
+}
+
+function setPluginOrder(req, res, branch) {
+  var plugins = req.body.plugin_order
+    , old = branch.plugins || []
+    , map = {}
+    , i
+  for (i=0; i<old.length; i++) {
+    map[old[i].id] = old[i]
+  }
+  for (i=0; i<plugins.length; i++) {
+    if (map[plugins[i].id]) {
+      plugins[i].config = map[plugins[i].id].config
+    } else {
+      plugins[i].config = {}
+    }
+  }
+  branch.plugins = plugins
+  req.project.markModified('branches')
+  req.project.save(function (err) {
+    if (err) return res.send(500, 'Failed to save plugin config')
+    res.send({success: true})
+  })
+}
+
+exports.reloadConfig = function (req, res, next) {
+  common.loader.initConfig(
+    path.join(__dirname, 'public/javascripts/pages/config-plugins-compiled.js'),
+    path.join(__dirname, 'public/stylesheets/css/config-plugins-compiled.css'),
+    function (err, configs) {
+      console.log('loaded config pages')
+      common.pluginConfigs = configs
+      common.loader.initUserConfig(
+        path.join(__dirname, 'public/javascripts/pages/account-plugins-compiled.js'),
+        path.join(__dirname, 'public/stylesheets/css/account-plugins-compiled.css'),
+        function (err, configs) {
+          console.log('loaded account config pages')
+          common.userConfigs = configs
+          next()
+        })
+    })
+}
 
 /*
  * GET /:org/:repo/config - project config page
  */
 exports.config = function(req, res) {
-  Step(
-    function() {
-      req.user.get_repo_config(req.repo_url, this);
-    },
-    function(err, repo_config) {
-      if (err) {
-        console.error("config() - Error fetching repo config for user %s: %s", req.user.email, err);
-        res.statusCode = 400;
-        return res.end("Bad Request");
-      }
-      this.repo_config = repo_config;
-      req.user.get_prod_deploy_target(repo_config.url, this);
-    },
-    function(err, deploy_target) {
-      var wrepo_config = whitelist_repo_config(this.repo_config);
-      var deploy_on_green = this.repo_config.prod_deploy_target.deploy_on_green;
-      // Default to true if not set
-      if (deploy_on_green === undefined) {
-        deploy_on_green = true;
-      }
-      var deploy_target_name = null;
-      if (deploy_target) {
-        deploy_target_name = deploy_target.app;
-      }
-      var params = {
-        repo_url: this.repo_config.url,
-        has_deploy_target: deploy_target != null,
-        deploy_target_name: deploy_target_name,
-        deploy_on_green: deploy_on_green
-      };
-      var apresParams = JSON.stringify(params);
-
-      var r = {
-         // May be undefined if not configured
-         display_name: wrepo_config.display_name,
-         badge_url: config.strider_server_name + '/' + req.user.id + '/' + req.params.org + '/' + req.params.repo + '/badge',
-         view_url: config.strider_server_name + '/' + req.params.org + '/' + req.params.repo,
-         repo: wrepo_config,
-         repo_org: req.params.org,
-         repo_name: req.params.repo,
-         apresParams: apresParams,
-         panels: [],
-         panelData: {}
-      };
-      var repo = this.repo_config
-
-
-      var loadPanelContent = function(ext, cb){
-        var panel = ext[1].panel
-        var extName = ext[0]
-        if (panel && panel.src){
-          if (typeof(panel.src) === 'string') {
-            try{
-              panel.contents = fs.readFileSync(panel.src, 'utf8')
-              return cb(null);
-            } catch (e){
-              // TODO - check error code
-              panel.contents = fs.readFileSync(path.join(ext[1].dir,panel.src), 'utf8')
-              return cb(null);
-            }
-          } else if (typeof(src) === 'function') {
-            panel.src(function(err, content){
-              panel.contents = content;
-              return cb(null)
-            })
-          } else {
-            cb("what is panel.src?")
-          }
-
-        }
-        panel.contents = "<h1>Extension " + (ext[1].title || ext[0]) + " needs no configuration</h1>"
-        return cb(null)
-      }
-
-      var loadPanelData = function(ext, cb){
-        var extName = ext[0]
-        if (ext[1].panel){
-          var panel = ext[1].panel
-          var scriptPath = panel.script_path
-          if (!panel.script_path) {
-            // Default script path is based on extension name
-            var scriptPath = '/ext/' + extName + '/project_config.js'
-            var ondiskPath = path.join(ext[1].dir, 'static', 'project_config.js')
-            try {
-              // Only set it if the file exists on disk though.
-              fs.statSync(ondiskPath)
-              panel.script_path = scriptPath
-            } catch(e) {}
-          }
-          if (typeof(panel.data) === 'function') {
-            return panel.data(req.user, repo, models, function(err, data){
-              r.panelData[extName] = data
-              cb(null, ext[1])
-            })
-          } else if (panel.data !== undefined) {
-            var data = {}
-            if (Array.isArray(panel.data)) {
-              panel.data.forEach(function (name) {
-                data[name] = repo.get(name)
-              })
-              r.panelData[extName] = data
-            } else if (typeof(panel.data) === 'string') {
-              r.panelData[extName] = repo.get(panel.data)
-            } else {
-              r.panelData[extName] = panel.data
-            }
-            
-            return cb(null, ext[1])
-          }
-
-          cb(null, panel)
-        } else {
-          // No Panel
-          ext[1].panel = {}
-          ext[1].id = ext[1].panel.id = ext[0]
-          ext[1].title = ext[1].panel.title = ext[0]
-          cb(null, ext[1])
-        }
-      }
-
-      var loadExtensionPanels = function(ext, cb){
-        loadPanelData(ext, function(err){
-          if (err) throw err
-          loadPanelContent(ext, function(err){
-            if (err) throw err
-            cb(null, ext[1].panel || ext[1])
-          })
-        })
-      }
-
-      var exts = [];
-      for (var i in common.extensions){
-        exts.push([i, common.extensions[i]])
-      }
-
-      async.map(exts, loadExtensionPanels, function(err, panels){
-        if (err) {
-          console.error("Error loading panels: %s", [err], new Error().stack);
-          res.statusCode = 500;
-          return res.end("Error handling request");
-        }
-        r.panels = panels;
-        return res.render('project_config.html', r);
-      
+  User.collaborators(req.project.name, 0, function (err, users) {
+    var data = {
+      collaborators: {},
+      project: req.project.toJSON()
+    }
+    delete data.project.creator
+    for (var i=0; i<users.length; i++) {
+      var p = _.find(users[i].projects, function(p) {
+        return p.name === req.project.name
       })
+      data.collaborators[users[i].email] = p.access_level
     }
-  );
-};
+    data.provider = common.pluginConfigs.provider[req.project.provider.id]
+    data.runners = common.pluginConfigs.runner
+    data.plugins = common.pluginConfigs.job
 
-
-/*
- * POST /webhook - Github push webhook handler
- */
-exports.webhook_signature = function(req, res)
-{
-  gh.verify_webhook_req_signature(req, function(isOk, repo, user, payload) {
-    var active = false;
-    // Repo can be undefined
-    if (isOk && repo) {
-      active = repo.active;
-    }
-    // Default to active if property is missing.
-    if (active === undefined) {
-      active = true;
-    }
-    if (active && isOk && gh.webhook_commit_is_to_master(payload)) {
-      console.log("received a correctly signed webhook for repo %s on master branch - starting task on user %s's behalf", repo.url, user.email);
-      var github_commit_id = payload.after;
-      var github_commit_info = gh.webhook_extract_latest_commit_info(payload);
-      var repo_ssh_url;
-      var repo_metadata;
-      if (user.github.id) {
-        repo_metadata = _.find(user.github_metadata[user.github.id].repos, function(item) {
-          return repo.url == item.html_url.toLowerCase();
-        });
-      }
-      // If we have Github metadata, use that. It is loosely coupled and can self-heal things like
-      // a configured Github Repo being renamed in Github (such as happened with Klingsbo)
-      // We do not have metadata in the manual setup case
-      if (repo_metadata) {
-        repo_ssh_url = repo_metadata.ssh_url;
-      } else {
-        // Manual setup case - try to synthesize a Github SSH url from the display URL.
-        // This is brittle because display urls can change, and the user (currently) has
-        // no way to change them (other than deleting and re-adding project).
-        var p = gh.parse_github_url(repo.display_url);
-        repo_ssh_url = gh.make_ssh_url(p.org, p.repo);
-      }
-      console.debug("POST to Github /webhook payload: %j", payload);
-      if (repo.has_prod_deploy_target) {
-        var deploy_config = _.find(user[repo.prod_deploy_target.provider], function(item) {
-          return item.account_id === repo.prod_deploy_target.account_id;
-        });
-        jobs.startJob(user, repo, deploy_config, github_commit_info, repo_ssh_url, TEST_AND_DEPLOY);
-      } else {
-        jobs.startJob(user, repo, deploy_config, github_commit_info, repo_ssh_url, TEST_ONLY);
-      }
-      res.end("webhook good");
+    var provider = common.extensions.provider[req.project.provider.id]
+    if (typeof provider.getBranches === 'function') {
+      provider.getBranches(req.user.account(req.project.provider).config,
+        req.project.provider.config, req.project, function(err, branches) {
+          if (err) {
+            console.error("could not fetch branches for repo %s: %s", req.project.name, err)
+            return res.render('project_config.html', data)
+          }
+          var have = {}
+            , newBranches = false
+            , i
+          for (i=0; i<req.project.branches.length; i++) {
+            have[req.project.branches[i].name] = true
+          }
+          for (i=0; i<branches.length; i++) {
+            if (have[branches[i]]) continue;
+            newBranches = true
+            req.project.branches.push({
+              name: branches[i],
+              mirror_master: true
+            })
+            data.project.branches.push({
+              name: branches[i],
+              mirror_master: true
+            })
+          }
+          if (!newBranches) return res.render('project_config.html', data)
+          
+          Project.update({_id: req.project._id}, {$set: {branches: req.project.branches}}, function (err, project) {
+            if (err || !project) console.error('failed to save branches')
+            res.render('project_config.html', data)
+          })
+      })
     } else {
-      console.log("received an incorrecly signed webhook or is not to master branch.");
-      res.end("webhook bad or irrelevant");
+      res.render('project_config.html', data)
     }
- });
-};
-
-exports.webhook_secret = function(req, res)
-{
-  gh.verify_webhook_req_secret(req, function(isOk, repo, user, payload) {
-    var active = repo.active;
-    // Default to active if property is missing.
-    if (active === undefined)
-      active = true;
-    if (active && isOk && gh.webhook_commit_is_to_master(payload)) {
-      console.log("received a correctly signed webhook for repo %s on master branch - starting task on user %s's behalf", repo.url, user.email);
-      var github_commit_id = payload.after;
-      var github_commit_info = gh.webhook_extract_latest_commit_info(payload);
-      // We don't have github metadata unless we have a linked github account.
-      var repo_metadata;
-      var repo_ssh_url;
-      if (user.github.id) {
-          repo_metadata = _.find(user.github_metadata[user.github.id].repos, function(item) {
-              return repo.url == item.html_url.toLowerCase();
-          });
-      }
-      // If we have Github metadata, use that. It is loosely coupled and can self-heal things like
-      // a configured Github Repo being renamed in Github (such as happened with Klingsbo)
-      // We do not have metadata in the manual setup case
-      if (repo_metadata) {
-        repo_ssh_url = repo_metadata.ssh_url;
-      } else {
-        // Manual setup case - try to synthesize a Github SSH url from the display URL.
-        // This is brittle because display urls can change, and the user (currently) has
-        // no way to change them (other than deleting and re-adding project).
-        var p = gh.parse_github_url(repo.display_url);
-        repo_ssh_url = gh.make_ssh_url(p.org, p.repo);
-      }
-      console.debug("POST to Github /webhook payload: %j", payload);
-      if (repo.has_prod_deploy_target) {
-        var deploy_config = _.find(user[repo.prod_deploy_target.provider], function(item) {
-          return item.account_id === repo.prod_deploy_target.account_id;
-        });
-        jobs.startJob(user, repo, deploy_config, github_commit_info, repo_ssh_url, TEST_AND_DEPLOY);
-      } else {
-        jobs.startJob(user, repo, deploy_config, github_commit_info, repo_ssh_url, TEST_ONLY);
-      }
-      res.end("webhook good");
-    } else {
-      console.log("gh: " + gh.webhook_commit_is_to_master(payload));
-      console.log("received an incorrecly signed webhook or is not to master branch.");
-      res.end("webhook bad or irrelevant");
-    }
- });
-};
-
-/*
- * app.get('/:org/:repo/delete', middleware.require_resource_admin, routes.delete_project);
- * delete project. should be rewritten as backbone and api call
- * todo: should delete github webhook and deploy key
- * todo: should add 'archived' flag to jobs
- */
-
-exports.delete_project = function(req,res) {
-  var repo_url = "https://github.com/" + req.params.org + "/" + req.params.repo;
-  repo_url = repo_url.toLowerCase();
-
-  var conditions = { email: req.user.email }, update = {$pull : {github_config:{url:repo_url}}};
-  User.update(conditions, update, function(err,numAffected) {
-    if (err) throw err;
-    console.log("deleted: " + repo_url);
-    res.redirect("/");
-  });
+  })
 }
 
 /*
@@ -407,7 +271,6 @@ exports.status = function(req, res) {
       results: [],
       errors: [{message:message}]
     }
-   // return res.end(JSON.stringify(resp, null, "\t"));
    return res.jsonp(resp)
   }
 
@@ -419,7 +282,6 @@ exports.status = function(req, res) {
       results: [{message:"system operational"}],
       errors: []
     }
-    //return res.end(JSON.stringify(resp, null, "\t"));
     return res.jsonp(resp)
   }
 
@@ -434,4 +296,124 @@ exports.status = function(req, res) {
   });
 
 };
+
+function getDeep(obj) {
+  return [].slice.call(arguments, 1).reduce(function (obj, name) {
+    return obj && obj[name]
+  }, obj)
+}
+
+function deepObj(obj) {
+  var names = [].slice.call(arguments, 1)
+  return names.reduce(function (obj, name) {
+    return obj[name] || (obj[name] = {})
+  }, obj)
+}
+
+function groupRepos(account, repomap, tree, repos) {
+  var groups = deepObj(repomap, account.provider, account.id)
+    , projectmap = getDeep(tree, account.provider, account.id) || {}
+  for (var i=0; i<repos.length; i++) {
+    if (!groups[repos[i].group]) {
+      groups[repos[i].group] = {
+        configured: 0,
+        repos: []
+      }
+    }
+    repos[i].project = projectmap[repos[i].id]
+    groups[repos[i].group].repos.push(repos[i])
+    if (repos[i].project) {
+      groups[repos[i].group].configured += 1
+    }
+  }
+}
+
+function availableProjectTypes() {
+  var available = {}
+    , plugins
+    , good
+  for (var id in common.project_types) {
+    good = true
+    plugins = common.project_types[id].plugins
+    for (var i=0; i<plugins.length; i++) {
+      if (!common.extensions.job[plugins[i]]) {
+        good = false
+        break;
+      }
+    }
+    if (good) {
+      available[id] = common.project_types[id]
+    }
+  }
+  return available
+}
+
+// GET /projects
+// 
+// This is where the "add project" flow starts.
+exports.projects = function(req, res) {
+  var tasks = []
+    , repomap = {}
+    , configured = {}
+    , unconfigured = []
+    , providers = common.userConfigs.provider
+
+  Project.find({creator: req.user._id}).lean().exec(function (err, projects) {
+    if (err) return res.send(500, 'Failed to get projects from the database')
+    // tree is { providerid: { accountid: { repoid: project._id, ...}, ...}, ...}
+    // to track which repos have been configured
+    var tree = {}
+      , account
+    for (var i=0; i<projects.length; i++) {
+      account = projects[i].provider
+      deepObj(tree, projects[i].provider.id, projects[i].provider.account)[projects[i].provider.repo_id] = {
+        _id: projects[i]._id,
+        name: projects[i].name
+      }
+    }
+
+    req.user.accounts.forEach(function (account) {
+      configured[account.provider] = true
+
+      // Caching
+      var useCache = req.query.refresh !== 'true'  && req.query.refresh !== '1'
+      var haveCache = Array.isArray(account.cache) && account.cache.length > 0
+      if (useCache && haveCache) {
+        groupRepos(account, repomap, tree, account.toJSON().cache)
+        return
+      }
+
+      tasks.push(function (next) {
+        var listRepos = common.extensions.provider[account.provider].listRepos
+        listRepos(account.config, function (err, repos) {
+          if (err) return next(err)
+          account.set('cache', repos)
+          groupRepos(account, repomap, tree, repos)
+          account.last_updated = new Date()
+          next()
+        })
+      })
+    })
+    for (var id in providers) {
+      if (configured[id] || !providers[id].setupLink) continue;
+      unconfigured.push(providers[id])
+    }
+    async.parallel(tasks, function(err, r) {
+      if (err) return res.send(500, 'Error while getting repos: ' + err.message + ':' + err.stack)
+      // cache the fetched repos
+      User.update({_id:req.user._id}, {$set:{accounts:req.user.toJSON().accounts}}, function(err, num) {
+        if (err) console.error('error saving repo cache')
+        if (!num) console.error("Didn't effect any users")
+        console.log('Saved cache')
+        // user is already be available via the "currentUser" template variable
+        return res.render('projects.html', {
+          unconfigured: unconfigured,
+          providers: providers,
+          repos: repomap,
+          project_types: availableProjectTypes()
+        });
+      })
+    })
+  })
+}
 

@@ -1,6 +1,7 @@
 {
   "strict": false,
   "laxcomma": true,
+  "laxbreak": true,
   "undef": true,
   "node": true,
   "-W033": false,
@@ -8,6 +9,9 @@
   "-W030": false,
   "-W069": false,
   "-W089": false,
+  "-W093": false,
   "-W098": false,
-  "-W116": false
+  "-W116": false,
+  "-W083": false,
+  "-W065": false
 }
